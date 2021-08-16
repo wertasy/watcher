@@ -1,4 +1,4 @@
-package inotify
+package watcher
 
 import (
 	"strings"
@@ -57,24 +57,24 @@ func (e *Event) IsCreate() bool {
 	return e.Mask&IN_CREATE == IN_CREATE
 }
 
-type Watcher struct {
-	fd     int
-	wd     map[string]int
-	path   map[int]string
-	events chan *Event
+type InodeWatcher struct {
+	fd   int
+	wd   map[string]int
+	path map[int]string
+	ch   chan *Event
 }
 
-func NewWatcher() (*Watcher, error) {
+func NewInodeWatcher() (*InodeWatcher, error) {
 	fd, err := syscall.InotifyInit()
 	if err != nil {
 		return nil, err
 	}
 
-	w := &Watcher{
-		fd:     fd,
-		wd:     make(map[string]int),
-		path:   make(map[int]string),
-		events: make(chan *Event),
+	w := &InodeWatcher{
+		fd:   fd,
+		wd:   make(map[string]int),
+		path: make(map[int]string),
+		ch:   make(chan *Event),
 	}
 
 	go w.readLoop()
@@ -82,7 +82,7 @@ func NewWatcher() (*Watcher, error) {
 	return w, nil
 }
 
-func (w *Watcher) Add(path string, mask uint32) error {
+func (w *InodeWatcher) Add(path string, mask uint32) error {
 	path = strings.TrimSuffix(path, "/")
 	if _, ok := w.wd[path]; ok {
 		return nil
@@ -99,7 +99,7 @@ func (w *Watcher) Add(path string, mask uint32) error {
 	return nil
 }
 
-func (w *Watcher) Remove(path string) error {
+func (w *InodeWatcher) Remove(path string) error {
 	path = strings.TrimSuffix(path, "/")
 	wd, ok := w.wd[path]
 	if !ok {
@@ -117,14 +117,14 @@ func (w *Watcher) Remove(path string) error {
 	return nil
 }
 
-func (w *Watcher) Close() {
+func (w *InodeWatcher) Close() {
 	for path := range w.wd {
 		w.Remove(path)
 	}
 	syscall.Close(w.fd)
 }
 
-func (w *Watcher) readLoop() {
+func (w *InodeWatcher) readLoop() {
 	buf := make([]byte, syscall.SizeofInotifyEvent*4096)
 
 	for {
@@ -149,7 +149,7 @@ func (w *Watcher) readLoop() {
 				offset += int(row.Len)
 			}
 
-			w.events <- event
+			w.ch <- event
 		}
 	}
 }
@@ -163,6 +163,6 @@ func toString(bytes []byte) string {
 	return string(bytes)
 }
 
-func (w *Watcher) Wait() <-chan *Event {
-	return w.events
+func (w *InodeWatcher) Wait() <-chan *Event {
+	return w.ch
 }

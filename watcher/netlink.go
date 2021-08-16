@@ -1,8 +1,10 @@
-package inotify
+package watcher
 
 import (
 	"fmt"
+	"net"
 	"syscall"
+	"unsafe"
 )
 
 const (
@@ -18,10 +20,36 @@ type NetlinkWatcher struct {
 	fd int
 	sa *syscall.SockaddrNetlink
 
-	ch chan NetlinkMsg
+	ch chan *NetlinkMsg
 }
 
+// NetlinkMessage represents a netlink message.
+// type NetlinkMessage struct {
+// 	Header NlMsghdr
+// 	Data   []byte
+// }
 type NetlinkMsg syscall.NetlinkMessage
+
+type AddrMsg struct {
+	IfAddrmsg syscall.IfAddrmsg
+	RtAttr    syscall.RtAttr
+	Addr      net.IP
+	Mask      net.IPMask
+}
+
+func (m *NetlinkMsg) ParseAddrMsg() *AddrMsg {
+	msg := (*syscall.IfAddrmsg)(unsafe.Pointer(&m.Data[0]))
+	attr := (*syscall.RtAttr)(unsafe.Pointer(&m.Data[syscall.SizeofIfAddrmsg]))
+	begin := syscall.SizeofIfAddrmsg + syscall.SizeofRtAttr
+	end := syscall.SizeofIfAddrmsg + attr.Len
+	addr := m.Data[begin:end]
+	return &AddrMsg{
+		IfAddrmsg: *msg,
+		RtAttr:    *attr,
+		Addr:      addr,
+		Mask:      net.CIDRMask(int(msg.Prefixlen), 8*len(addr)),
+	}
+}
 
 func NewNetlinkWatcher() (*NetlinkWatcher, error) {
 	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_DGRAM, syscall.NETLINK_ROUTE)
@@ -40,37 +68,41 @@ func NewNetlinkWatcher() (*NetlinkWatcher, error) {
 		return nil, fmt.Errorf("failed to bind socket: %w", err)
 	}
 
-	w := &NetlinkWatcher{fd: fd, sa: saddr, ch: make(chan NetlinkMsg)}
+	w := &NetlinkWatcher{fd: fd, sa: saddr, ch: make(chan *NetlinkMsg)}
 
 	go w.readLoop()
 
 	return w, nil
 }
 
-func (l *NetlinkWatcher) readLoop() error {
-	pkt := make([]byte, 4096)
+func (w *NetlinkWatcher) readLoop() error {
+	buff := make([]byte, 4096)
 
 	for {
-		n, err := syscall.Read(l.fd, pkt)
+		n, err := syscall.Read(w.fd, buff)
 		if err != nil {
 			// return fmt.Errorf("failed to read: %s", err)
 			continue
 		}
 
-		msgs, err := syscall.ParseNetlinkMessage(pkt[:n])
+		msgs, err := syscall.ParseNetlinkMessage(buff[:n])
 		if err != nil {
 			// return fmt.Errorf("failed to parse: %s", err)
 			continue
 		}
 
 		for _, msg := range msgs {
-			l.ch <- NetlinkMsg(msg)
+			w.ch <- (*NetlinkMsg)(unsafe.Pointer(&msg))
 		}
 	}
 }
 
-func (w *NetlinkWatcher) Wait() <-chan NetlinkMsg {
+func (w *NetlinkWatcher) Wait() <-chan *NetlinkMsg {
 	return w.ch
+}
+
+func (w *NetlinkWatcher) Close() {
+	syscall.Close(w.fd)
 }
 
 func (msg *NetlinkMsg) IsNewAddr() bool {
